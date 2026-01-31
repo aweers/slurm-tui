@@ -12,13 +12,15 @@ import (
 )
 
 type model struct {
-	activeTab int // 0 = queue, 1 = job details
-	width     int
-	height    int
-	jobs      []Job
-	logsOut   string
-	logsErr   string
-	err       error
+	activeTab  int // 0 = queue, 1 = job details
+	width      int
+	height     int
+	jobs       []Job
+	logsOut    string
+	logsErr    string
+	err        error
+	confirming bool
+	dismissed  map[string]bool
 }
 
 type Job struct {
@@ -42,6 +44,7 @@ type logMsg struct {
 func initialModel() model {
 	return model{
 		activeTab: 0,
+		dismissed: make(map[string]bool),
 	}
 }
 
@@ -65,12 +68,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.KeyMsg:
+		if m.confirming {
+			switch msg.String() {
+			case "y", "Y":
+				m.confirming = false
+
+				if m.activeTab > 0 && m.activeTab <= len(m.jobs) {
+					job := m.jobs[m.activeTab-1]
+
+					if job.State == "RUNNING" || job.State == "PENDING" {
+						cmds = append(cmds, cancelJobCmd(job.ID))
+					} else {
+						m.dismissed[job.ID] = true
+						cmds = append(cmds, fetchJobsCmd())
+						m.activeTab = 0
+					}
+				}
+			default:
+				m.confirming = false
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 
 		case "r":
 			return m, fetchJobsCmd()
+
+		case "d":
+			if m.activeTab > 0 {
+				m.confirming = true
+			}
 
 		case "tab":
 			m.activeTab++
@@ -98,6 +128,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case jobMsg:
+		var visibleJobs []Job
+		for _, j := range msg {
+			if !m.dismissed[j.ID] {
+				visibleJobs = append(visibleJobs, j)
+			}
+		}
+
 		m.jobs = msg
 		if m.activeTab > len(m.jobs) {
 			m.activeTab = 0
@@ -181,6 +218,28 @@ func (m model) View() string {
 		content += "\n  [d] Cancel/Dismiss (Not impl)  [r] Refresh"
 	}
 
+	if m.confirming {
+		job := m.jobs[m.activeTab-1]
+		action := "DISMISS"
+		if job.State == "RUNNING" || job.State == "PENDING" {
+			action = "CANCEL (scancel)"
+		}
+
+		alertStyle := lipgloss.NewStyle().
+			Border(lipgloss.DoubleBorder()).
+			BorderForeground(lipgloss.Color("196")). // Red
+			Bold(true).
+			Padding(1, 2).
+			Align(lipgloss.Center)
+
+		alertBox := alertStyle.Render(fmt.Sprintf(
+			"WARNING: Are you sure you want to %s job %s?\n\n[y] Yes    [n] No",
+			action, job.ID,
+		))
+
+		content = "\n\n" + alertBox + "\n\n"
+	}
+
 	return tabRow + "\n" + content
 }
 
@@ -252,6 +311,18 @@ func readLogCmd(jobID string) tea.Cmd {
 
 		return logMsg{out: outStr, err: errStr}
 
+	}
+}
+
+func cancelJobCmd(id string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("scancel", id)
+		err := cmd.Run()
+
+		if err != nil {
+			return errMsg(fmt.Errorf("failed to cancel job %s: %v", id, err))
+		}
+		return nil
 	}
 }
 
