@@ -7,20 +7,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
 type model struct {
-	activeTab  int // 0 = queue, 1 = job details
-	width      int
-	height     int
-	jobs       []Job
-	logsOut    string
-	logsErr    string
-	err        error
-	confirming bool
-	dismissed  map[string]bool
+	activeTab   int // 0 = queue, 1 = job details
+	width       int
+	height      int
+	jobs        []Job
+	vpOut       viewport.Model
+	vpErr       viewport.Model
+	vpReady     bool
+	focusedPane int
+	err         error
+	confirming  bool
+	dismissed   map[string]bool
 }
 
 type Job struct {
@@ -63,10 +66,43 @@ func (m *model) mergeJobs(newJobs []Job) {
 	m.jobs = newJobs
 }
 
+func updateViewportContent(vp *viewport.Model, content string) {
+	wasAtBottom := vp.AtBottom()
+
+	vp.SetContent(content)
+
+	if wasAtBottom {
+		vp.GotoBottom()
+	}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
+	var (
+		cmd  tea.Cmd
+		cmds []tea.Cmd
+	)
 
 	switch msg := msg.(type) {
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+
+		headerHeight := 6
+		footerHeight := 2
+		paneHeight := m.height - headerHeight - footerHeight
+		halfWidth := (m.width / 2) - 2
+
+		if !m.vpReady {
+			m.vpOut = viewport.New(halfWidth, paneHeight)
+			m.vpErr = viewport.New(halfWidth, paneHeight)
+			m.vpReady = true
+		} else {
+			m.vpOut.Width = halfWidth
+			m.vpOut.Height = paneHeight
+			m.vpErr.Width = halfWidth
+			m.vpErr.Height = paneHeight
+		}
 
 	case tea.KeyMsg:
 		if m.confirming {
@@ -122,11 +158,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				job := m.jobs[m.activeTab-1]
 				cmds = append(cmds, readLogCmd(job.ID))
 			}
+
+		case "left":
+			if m.activeTab > 0 {
+				m.focusedPane = 0
+			}
+
+		case "right":
+			if m.activeTab > 0 {
+				m.focusedPane = 1
+			}
 		}
 
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
+		if m.activeTab > 0 && m.vpReady {
+			if m.focusedPane == 0 {
+				m.vpOut, cmd = m.vpOut.Update(msg)
+				cmds = append(cmds, cmd)
+			} else {
+				m.vpErr, cmd = m.vpErr.Update(msg)
+				cmds = append(cmds, cmd)
+			}
+		}
 
 	case jobMsg:
 		var visibleJobs []Job
@@ -142,8 +194,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case logMsg:
-		m.logsOut = msg.out
-		m.logsErr = msg.err
+		if m.vpReady {
+			updateViewportContent(&m.vpOut, msg.out)
+			updateViewportContent(&m.vpErr, msg.err)
+		}
 
 	case tickMsg:
 		cmds = append(cmds, fetchJobsCmd())
@@ -223,19 +277,39 @@ func (m model) View() string {
 		content += "\n  [r] Refresh  [q] Quit  [Tab] Cycle Jobs"
 
 	} else {
-		job := m.jobs[m.activeTab-1]
-		header := lipgloss.NewStyle().
-			Foreground(getJobColor(job.State)).
-			Render(fmt.Sprintf("Viewing Job %s on Node %s [%s]", job.ID, job.Nodes, job.State))
+		if !m.vpReady {
+			content = "Initializing viewports..."
+		} else {
+			var leftBorder, rightBorder lipgloss.Style
 
-		halfWidth := (m.width / 2) - 4
-		paneHeight := m.height - 10
-		paneStyle := lipgloss.NewStyle().Width(halfWidth).Height(paneHeight).Border(lipgloss.RoundedBorder()).Padding(0, 1)
+			focusedStyle := lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("69")).
+				Padding(0, 1)
 
-		leftPane := paneStyle.Render(fmt.Sprintf("STDOUT:\n\n%s", m.logsOut))
-		rightPane := paneStyle.Render(fmt.Sprintf("STDERR:\n\n%s", m.logsErr))
+			unfocusedStyle := lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder()).
+				BorderForeground(lipgloss.Color("240")).
+				Padding(0, 1)
 
-		content = "\n  " + header + "\n" + lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
+			if m.focusedPane == 0 {
+				leftBorder = focusedStyle
+				rightBorder = unfocusedStyle
+			} else {
+				leftBorder = unfocusedStyle
+				rightBorder = focusedStyle
+			}
+
+			leftPane := leftBorder.Render(m.vpOut.View())
+			rightPane := rightBorder.Render(m.vpErr.View())
+
+			job := m.jobs[m.activeTab-1]
+			header := lipgloss.NewStyle().
+				Foreground(getJobColor(job.State)).
+				Render(fmt.Sprintf("Viewing Job %s on Node %s [%s]", job.ID, job.Nodes, job.State))
+
+			content = "\n  " + header + "\n" + lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
+		}
 	}
 
 	if m.confirming {
