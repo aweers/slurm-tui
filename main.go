@@ -29,6 +29,7 @@ type Job struct {
 	State     string
 	Time      string
 	TimeLimit string
+	Nodes     string
 }
 
 type jobMsg []Job
@@ -161,32 +162,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	activeTabStyle := lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color("205")).
-		Border(lipgloss.RoundedBorder()).
-		Padding(0, 1)
-
-	inactiveTabStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")).
-		Border(lipgloss.NormalBorder()).
-		Padding(0, 1)
+	baseTabStyle := lipgloss.NewStyle().Padding(0, 1)
 
 	var tabs []string
 
 	if m.activeTab == 0 {
-		tabs = append(tabs, activeTabStyle.Render("Summary"))
+		tabs = append(tabs, baseTabStyle.Copy().
+			Bold(true).
+			Foreground(lipgloss.Color("205")).
+			Border(lipgloss.RoundedBorder()).
+			Render("Summary"))
 	} else {
-		tabs = append(tabs, inactiveTabStyle.Render("Summary"))
+		tabs = append(tabs, baseTabStyle.Copy().
+			Foreground(lipgloss.Color("240")).
+			Border(lipgloss.NormalBorder()).
+			Render("Summary"))
 	}
 
 	for i, job := range m.jobs {
+		c := getJobColor(job.State)
 		title := fmt.Sprintf("%s (%s)", job.ID, job.State)
+		style := baseTabStyle.Copy().Foreground(c)
 		if m.activeTab == i+1 {
-			tabs = append(tabs, activeTabStyle.Render(title))
+			style = style.Border(lipgloss.RoundedBorder()).Bold(true)
 		} else {
-			tabs = append(tabs, inactiveTabStyle.Render(title))
+			style = style.Border(lipgloss.NormalBorder())
 		}
+		tabs = append(tabs, style.Render(title))
 	}
 
 	tabRow := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
@@ -194,28 +196,46 @@ func (m model) View() string {
 	content := ""
 
 	if m.activeTab == 0 {
-		content = "\n  Summary of " + fmt.Sprintf("%d", len(m.jobs)) + " jobs.\n\n"
+		header := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("255")).
+			Render(fmt.Sprintf("%-10s  %-15s  %-12s  %-12s  %-15s", "JOB ID", "NAME", "STATE", "TIME", "NODES"))
+
+		rows := ""
 		for _, j := range m.jobs {
-			content += fmt.Sprintf("  ID: %-10s | %-10s | %s\n", j.ID, j.Name, j.State)
+			stateStyle := lipgloss.NewStyle().Foreground(getJobColor(j.State))
+			rows += fmt.Sprintf("%-10s  %-15s  %s  %-12s  %-15s\n",
+				j.ID,
+				// Truncate name if too long
+				func() string {
+					if len(j.Name) > 15 {
+						return j.Name[:12] + "..."
+					} else {
+						return j.Name
+					}
+				}(),
+				stateStyle.Render(j.State),
+				j.Time,
+				j.Nodes)
 		}
+
+		content = "\n " + header + "\n\n " + strings.ReplaceAll(rows, "\n", "\n ")
 		content += "\n  [r] Refresh  [q] Quit  [Tab] Cycle Jobs"
 
 	} else {
+		job := m.jobs[m.activeTab-1]
+		header := lipgloss.NewStyle().
+			Foreground(getJobColor(job.State)).
+			Render(fmt.Sprintf("Viewing Job %s on Node %s [%s]", job.ID, job.Nodes, job.State))
+
 		halfWidth := (m.width / 2) - 4
 		paneHeight := m.height - 10
+		paneStyle := lipgloss.NewStyle().Width(halfWidth).Height(paneHeight).Border(lipgloss.RoundedBorder()).Padding(0, 1)
 
-		paneStyle := lipgloss.NewStyle().
-			Width(halfWidth).
-			Height(paneHeight).
-			Border(lipgloss.RoundedBorder()).
-			Padding(0, 1)
-
-		// Create the two boxes
 		leftPane := paneStyle.Render(fmt.Sprintf("STDOUT:\n\n%s", m.logsOut))
 		rightPane := paneStyle.Render(fmt.Sprintf("STDERR:\n\n%s", m.logsErr))
 
-		content = lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
-		content += "\n  [d] Cancel/Dismiss (Not impl)  [r] Refresh"
+		content = "\n  " + header + "\n" + lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
 	}
 
 	if m.confirming {
@@ -245,15 +265,15 @@ func (m model) View() string {
 
 func checkSlurm() ([]Job, error) {
 	// We use -o to specify format: %i (ID) %j (Name) %T (State) %M (Time Used) %L (Time Left)
-	cmd := exec.Command("squeue", "--me", "--noheader", "-o", "%i %j %T %M %L")
+	cmd := exec.Command("squeue", "--me", "--noheader", "-o", "%i %j %T %M %L %N")
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// return dummy data (development)
 		return []Job{
-			{ID: "101", Name: "alpha_run", State: "RUNNING", Time: "05:00", TimeLimit: "24:00"},
-			{ID: "102", Name: "beta_sim", State: "PENDING", Time: "00:00", TimeLimit: "02:00"},
-			{ID: "103", Name: "gamma_train", State: "COMPLETED", Time: "01:30", TimeLimit: "02:00"},
+			{ID: "101", Name: "alpha_run", State: "RUNNING", Time: "05:00", TimeLimit: "24:00", Nodes: "gpu-node-01"},
+			{ID: "102", Name: "beta_sim", State: "PENDING", Time: "00:00", TimeLimit: "02:00", Nodes: "(Priority)"},
+			{ID: "103", Name: "gamma_train", State: "COMPLETED", Time: "01:30", TimeLimit: "02:00", Nodes: "cpu-node-05"},
 		}, nil
 	}
 
@@ -272,10 +292,26 @@ func checkSlurm() ([]Job, error) {
 				State:     parts[2],
 				Time:      parts[3],
 				TimeLimit: parts[4],
+				Nodes:     parts[5],
 			})
 		}
 	}
 	return jobs, nil
+}
+
+func getJobColor(state string) lipgloss.Color {
+	switch state {
+	case "RUNNING":
+		return lipgloss.Color("42")
+	case "PENDING":
+		return lipgloss.Color("220")
+	case "COMPLETED":
+		return lipgloss.Color("240")
+	case "FAILED", "CANCELLED", "TIMEOUT":
+		return lipgloss.Color("196")
+	default:
+		return lipgloss.Color("255")
+	}
 }
 
 func fetchJobsCmd() tea.Cmd {
