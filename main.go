@@ -359,7 +359,7 @@ func checkSlurm() ([]Job, error) {
 			continue
 		}
 		parts := strings.Fields(line)
-		if len(parts) >= 5 {
+		if len(parts) >= 6 {
 			jobs = append(jobs, Job{
 				ID:        parts[0],
 				Name:      parts[1],
@@ -368,6 +368,16 @@ func checkSlurm() ([]Job, error) {
 				TimeLimit: parts[4],
 				Nodes:     parts[5],
 			})
+		} else {
+			if len(parts) >= 5 {
+				jobs = append(jobs, Job{
+					ID:        parts[0],
+					Name:      parts[1],
+					State:     parts[2],
+					Time:      parts[3],
+					TimeLimit: parts[4],
+				})
+			}
 		}
 	}
 	return jobs, nil
