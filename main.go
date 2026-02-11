@@ -13,17 +13,26 @@ import (
 )
 
 type model struct {
-	activeTab   int // 0 = queue, 1 = job details
-	width       int
-	height      int
-	jobs        []Job
-	vpOut       viewport.Model
-	vpErr       viewport.Model
-	vpReady     bool
-	focusedPane int
-	err         error
-	confirming  bool
-	dismissed   map[string]bool
+	activeTab     int // 0 = queue, 1 = job details
+	width         int
+	height        int
+	jobs          []Job
+	vpOut         viewport.Model
+	vpErr         viewport.Model
+	vpReady       bool
+	focusedPane   int
+	err           error
+	confirming    bool
+	dismissed     map[string]bool
+	jobMap        map[string]Job
+	jobOrder      []string
+	statusMessage string
+	statusColor   string
+}
+
+type statusMsg struct {
+	text  string
+	color string
 }
 
 type Job struct {
@@ -49,6 +58,8 @@ func initialModel() model {
 	return model{
 		activeTab: 0,
 		dismissed: make(map[string]bool),
+		jobMap:    make(map[string]Job),
+		jobOrder:  []string{},
 	}
 }
 
@@ -181,16 +192,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case jobMsg:
-		var visibleJobs []Job
-		for _, j := range msg {
-			if !m.dismissed[j.ID] {
-				visibleJobs = append(visibleJobs, j)
+		seenInThisUpdate := make(map[string]bool)
+
+		for _, incomingJob := range msg {
+			seenInThisUpdate[incomingJob.ID] = true
+
+			if existing, exists := m.jobMap[incomingJob.ID]; exists {
+				existing.State = incomingJob.State
+				existing.Time = incomingJob.Time
+				existing.Nodes = incomingJob.Nodes
+				m.jobMap[incomingJob.ID] = existing
+			} else {
+				m.jobMap[incomingJob.ID] = incomingJob
+				m.jobOrder = append(m.jobOrder, incomingJob.ID)
 			}
 		}
 
-		m.jobs = msg
-		if m.activeTab > len(m.jobs) {
-			m.activeTab = 0
+		for id, job := range m.jobMap {
+			if !seenInThisUpdate[id] {
+				if job.State == "RUNNING" || job.State == "PENDING" {
+					job.State = "COMPLETED"
+					m.jobMap[id] = job
+				}
+			}
+		}
+
+		var visibleJobs []Job
+		var newOrder []string
+
+		for _, id := range m.jobOrder {
+			if m.dismissed[id] {
+				continue
+			}
+			if job, exists := m.jobMap[id]; exists {
+				visibleJobs = append(visibleJobs, job)
+				newOrder = append(newOrder, id)
+			}
 		}
 
 	case logMsg:
@@ -207,6 +244,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, readLogCmd(job.ID))
 		}
 		cmds = append(cmds, waitForTick())
+
+	case statusMsg:
+		m.statusMessage = msg.text
+		m.statusColor = msg.color
 
 	case errMsg:
 		m.err = msg
@@ -334,7 +375,12 @@ func (m model) View() string {
 		content = "\n\n" + alertBox + "\n\n"
 	}
 
-	return tabRow + "\n" + content
+	status := ""
+	if m.statusMessage != "" {
+		status = lipgloss.NewStyle().Foreground(lipgloss.Color(m.statusColor)).Render(m.statusMessage)
+	}
+
+	return tabRow + "\n" + content + "\n\n" + status
 }
 
 func checkSlurm() ([]Job, error) {
@@ -437,12 +483,16 @@ func readLogCmd(jobID string) tea.Cmd {
 func cancelJobCmd(id string) tea.Cmd {
 	return func() tea.Msg {
 		cmd := exec.Command("scancel", id)
-		err := cmd.Run()
+		out, err := cmd.CombinedOutput()
 
 		if err != nil {
-			return errMsg(fmt.Errorf("failed to cancel job %s: %v", id, err))
+			cleanErr := strings.TrimSpace(string(out))
+			if cleanErr == "" {
+				cleanErr = err.Error()
+			}
+			return statusMsg{text: fmt.Sprintf("Error canceling %s: %s", id, cleanErr), color: "196"}
 		}
-		return nil
+		return statusMsg{text: fmt.Sprintf("Signal sent ot cancel job %s", id), color: "42"}
 	}
 }
 
