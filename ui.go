@@ -44,6 +44,10 @@ type model struct {
 	statusText   string
 	statusColor  string
 	err          error
+
+	outContentCache    string
+	errContentCache    string
+	mergedContentCache string
 }
 
 type jobMsg []Job
@@ -99,12 +103,19 @@ func getJobColor(state string) lipgloss.Color {
 	}
 }
 
-func updateViewportContent(vp *viewport.Model, content string, follow bool) {
+func updateViewportContent(vp *viewport.Model, content string, cache *string, follow bool) {
+	if *cache == content {
+		return
+	}
 	wasAtBottom := vp.AtBottom()
+	yOffset := vp.YOffset
 	vp.SetContent(content)
 	if follow || wasAtBottom {
 		vp.GotoBottom()
+	} else {
+		vp.SetYOffset(yOffset)
 	}
+	*cache = content
 }
 
 func (m *model) selectedJob() (Job, bool) {
@@ -162,9 +173,12 @@ func (m *model) switchToJob(job Job) {
 	m.follow = true
 
 	if m.vpReady {
-		updateViewportContent(&m.vpOut, "", true)
-		updateViewportContent(&m.vpErr, "", true)
-		updateViewportContent(&m.vpMerged, "", true)
+		m.outContentCache = "\x00"
+		m.errContentCache = "\x00"
+		m.mergedContentCache = "\x00"
+		updateViewportContent(&m.vpOut, "", &m.outContentCache, true)
+		updateViewportContent(&m.vpErr, "", &m.errContentCache, true)
+		updateViewportContent(&m.vpMerged, "", &m.mergedContentCache, true)
 	}
 }
 
@@ -195,8 +209,8 @@ func (m *model) pollSelectedLogs() {
 		return
 	}
 
-	outContent := m.outFollower.content()
-	errContent := m.errFollower.content()
+	outContent := m.outFollower.content(m.vpOut.Width)
+	errContent := m.errFollower.content(m.vpErr.Width)
 	if outChunk.Missing && outContent == "" {
 		outContent = fmt.Sprintf("Waiting for output log for job %s...", job.ID)
 	}
@@ -204,9 +218,9 @@ func (m *model) pollSelectedLogs() {
 		errContent = fmt.Sprintf("Waiting for error log for job %s...", job.ID)
 	}
 
-	updateViewportContent(&m.vpOut, outContent, m.follow)
-	updateViewportContent(&m.vpErr, errContent, m.follow)
-	updateViewportContent(&m.vpMerged, m.mergedBuf.content(), m.follow)
+	updateViewportContent(&m.vpOut, outContent, &m.outContentCache, m.follow)
+	updateViewportContent(&m.vpErr, errContent, &m.errContentCache, m.follow)
+	updateViewportContent(&m.vpMerged, m.mergedBuf.content(), &m.mergedContentCache, m.follow)
 }
 
 func isScrollKey(k string) bool {
@@ -248,6 +262,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.vpMerged.Width = max(20, m.width-4)
 			m.vpMerged.Height = logsHeight
 		}
+		m.outContentCache = "\x00"
+		m.errContentCache = "\x00"
+		m.mergedContentCache = "\x00"
 
 	case jobMsg:
 		now := time.Now()
