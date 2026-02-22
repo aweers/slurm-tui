@@ -1,1 +1,4 @@
-GOOS=linux GOARCH=amd64 go build -o slurm-tui
+#!/usr/bin/env sh
+set -eu
+
+make linux-amd64
