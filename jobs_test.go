@@ -37,3 +37,25 @@ func TestJobStoreDoesNotDismissActive(t *testing.T) {
 		t.Fatalf("expected active job dismiss to fail")
 	}
 }
+
+func TestJobStoreMarksMissingCompletingAsTerminal(t *testing.T) {
+	now := time.Now()
+	store := NewJobStore()
+
+	store.ApplySnapshot([]Job{{ID: "1", Name: "train", State: "COMPLETING"}}, now)
+	store.ApplySnapshot([]Job{}, now.Add(5*time.Second))
+
+	rec, ok := store.Record("1")
+	if !ok {
+		t.Fatalf("expected record to exist")
+	}
+	if !rec.Terminal {
+		t.Fatalf("expected missing completing job to become terminal")
+	}
+	if rec.Job.State != "COMPLETED" {
+		t.Fatalf("expected completed fallback, got %s", rec.Job.State)
+	}
+	if ok := store.DismissIfTerminal("1"); !ok {
+		t.Fatalf("expected dismiss to succeed for terminal job")
+	}
+}

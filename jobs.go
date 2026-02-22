@@ -63,7 +63,7 @@ func (s *JobStore) ApplySnapshot(jobs []Job, now time.Time) {
 		if seen[id] {
 			continue
 		}
-		if isActiveState(rec.Job.State) {
+		if !rec.Terminal {
 			rec.Job.State = "COMPLETED"
 			rec.Terminal = true
 			rec.LastSeen = now

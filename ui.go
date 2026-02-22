@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -40,10 +41,12 @@ type model struct {
 	mergedMode bool
 	follow     bool
 
-	lastJobFetch time.Time
-	statusText   string
-	statusColor  string
-	err          error
+	lastJobFetch       time.Time
+	statusText         string
+	statusColor        string
+	err                error
+	cancelConfirm      bool
+	cancelConfirmJobID string
 
 	outContentCache    string
 	errContentCache    string
@@ -182,6 +185,123 @@ func (m *model) switchToJob(job Job) {
 	}
 }
 
+func (m *model) armCancelConfirm(jobID string) {
+	m.cancelConfirm = true
+	m.cancelConfirmJobID = jobID
+	m.statusText = fmt.Sprintf("cancel %s? [y/N]", jobID)
+	m.statusColor = "220"
+}
+
+func (m *model) clearCancelConfirm() {
+	m.cancelConfirm = false
+	m.cancelConfirmJobID = ""
+}
+
+func (m *model) handleCancelConfirmKey(key string) (tea.Cmd, bool) {
+	switch key {
+	case "y", "Y", "enter":
+		jobID := m.cancelConfirmJobID
+		m.clearCancelConfirm()
+		if err := cancelJob(jobID); err != nil {
+			m.statusText = err.Error()
+			m.statusColor = "196"
+			return nil, true
+		}
+		m.statusText = fmt.Sprintf("cancel signal sent for %s", jobID)
+		m.statusColor = "42"
+		return fetchJobsCmd(), true
+	case "n", "N", "esc", "c":
+		jobID := m.cancelConfirmJobID
+		m.clearCancelConfirm()
+		m.statusText = fmt.Sprintf("cancel aborted for %s", jobID)
+		m.statusColor = "244"
+		return nil, true
+	default:
+		m.statusText = "cancel pending: press y to confirm or n/esc to abort"
+		m.statusColor = "220"
+		return nil, true
+	}
+}
+
+func padOrTrimToWidth(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) > width {
+		s = ansi.Truncate(s, width, "")
+	}
+	if pad := width - lipgloss.Width(s); pad > 0 {
+		s += strings.Repeat(" ", pad)
+	}
+	return s
+}
+
+func centerOverlay(base, overlay string, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return base
+	}
+
+	baseLines := strings.Split(base, "\n")
+	if len(baseLines) > height {
+		baseLines = baseLines[:height]
+	} else if len(baseLines) < height {
+		baseLines = append(baseLines, make([]string, height-len(baseLines))...)
+	}
+	for i := range baseLines {
+		baseLines[i] = padOrTrimToWidth(baseLines[i], width)
+	}
+
+	overlayLines := strings.Split(overlay, "\n")
+	if len(overlayLines) > height {
+		overlayLines = overlayLines[:height]
+	}
+	top := max(0, (height-len(overlayLines))/2)
+
+	for i, line := range overlayLines {
+		if top+i >= len(baseLines) {
+			break
+		}
+		if lipgloss.Width(line) > width {
+			line = ansi.Truncate(line, width, "")
+		}
+		left := max(0, (width-lipgloss.Width(line))/2)
+		baseLine := baseLines[top+i]
+		prefix := ansi.Cut(baseLine, 0, left)
+		suffixStart := left + lipgloss.Width(line)
+		suffix := ""
+		if suffixStart < width {
+			suffix = ansi.Cut(baseLine, suffixStart, width)
+		}
+		baseLines[top+i] = padOrTrimToWidth(prefix+line+suffix, width)
+	}
+
+	return strings.Join(baseLines, "\n")
+}
+
+func (m model) renderCancelModal(base string) string {
+	if m.width <= 0 || m.height <= 0 {
+		return base
+	}
+
+	modalWidth := min(68, max(40, m.width-8))
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("229")).Render("Cancel Job")
+	message := fmt.Sprintf("Send cancel signal to job %s?", m.cancelConfirmJobID)
+	hint := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render("[y/enter] confirm    [n/esc] abort")
+
+	body := strings.Join([]string{title, "", message, "", hint}, "\n")
+	modal := lipgloss.NewStyle().
+		Width(modalWidth).
+		Padding(1, 2).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("214")).
+		Background(lipgloss.Color("236")).
+		Foreground(lipgloss.Color("255")).
+		Render(body)
+
+	dimmed := lipgloss.NewStyle().Faint(true).Render(base)
+	return centerOverlay(dimmed, modal, m.width, m.height)
+}
+
 func (m *model) pollSelectedLogs() {
 	job, ok := m.selectedJob()
 	if !ok {
@@ -300,7 +420,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		key := msg.String()
 		switch key {
-		case "ctrl+c", "q":
+		case "ctrl+c":
+			return m, tea.Quit
+		}
+
+		if m.cancelConfirm {
+			if cmd, consumed := m.handleCancelConfirmKey(key); consumed {
+				if cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				break
+			}
+		}
+
+		switch key {
+		case "q":
 			return m, tea.Quit
 		case "r":
 			cmds = append(cmds, fetchJobsCmd())
@@ -340,14 +474,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.statusColor = "220"
 					break
 				}
-				if err := cancelJob(job.ID); err != nil {
-					m.statusText = err.Error()
-					m.statusColor = "196"
-				} else {
-					m.statusText = fmt.Sprintf("cancel signal sent for %s", job.ID)
-					m.statusColor = "42"
-					cmds = append(cmds, fetchJobsCmd())
-				}
+				m.armCancelConfirm(job.ID)
 			}
 		case "d":
 			if job, ok := m.selectedJob(); ok {
@@ -500,13 +627,13 @@ func (m model) View() string {
 	statusLine := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(
 		fmt.Sprintf("Focus:%s  Mode:%s  Follow:%s", []string{"jobs", "stdout", "stderr"}[m.focusArea], mode, lipgloss.NewStyle().Foreground(followColor).Render(follow)),
 	)
-	actions := "[j/k] select  [tab] focus  [m] split/merged  [f] follow  [c] cancel  [d] dismiss terminal  [D] clear terminal  [r] refresh  [q] quit"
+	actions := "[j/k] select  [tab] focus  [m] split/merged  [f] follow  [c] cancel (confirm)  [d] dismiss terminal  [D] clear terminal  [r] refresh  [q] quit"
 	statusMsg := ""
 	if m.statusText != "" {
 		statusMsg = lipgloss.NewStyle().Foreground(lipgloss.Color(m.statusColor)).Render(m.statusText)
 	}
 
-	return strings.Join([]string{
+	base := strings.Join([]string{
 		header,
 		jobInfo,
 		jobsPanel,
@@ -515,10 +642,22 @@ func (m model) View() string {
 		actions,
 		statusMsg,
 	}, "\n")
+
+	if m.cancelConfirm {
+		return m.renderCancelModal(base)
+	}
+	return base
 }
 
 func max(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
